@@ -1,0 +1,1 @@
+export const firebaseConfig={apiKey:'AIzaSyDW4LQg00qGlkCGMXU6r1O2siUoQNAuaEM',authDomain:'buddhist-refuge.firebaseapp.com',projectId:'buddhist-refuge',storageBucket:'buddhist-refuge.firebasestorage.app',messagingSenderId:'831869561966',appId:'1:831869561966:web:22fcfaf56a4c805cf9ca7f'};
