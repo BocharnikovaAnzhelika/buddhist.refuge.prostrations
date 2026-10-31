@@ -1,13 +1,13 @@
 // Firebase-адаптер. Визуальные компоненты и аналитика не зависят от этой реализации.
 import {initializeApp} from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js';
-import {getAuth,onAuthStateChanged,sendSignInLinkToEmail,isSignInWithEmailLink,signInWithEmailLink,signOut} from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js';
+import {getAuth,onAuthStateChanged,sendSignInLinkToEmail,isSignInWithEmailLink,signInWithEmailLink,signOut,setPersistence,browserLocalPersistence} from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js';
 import {getFirestore,doc,getDoc,runTransaction} from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js';
 import {firebaseConfig} from './firebase-config.js';
 import {getState,applyState,setUser,readCache,readPreview,normalize} from './store.js';
 const app=initializeApp(firebaseConfig),auth=getAuth(app),db=getFirestore(app);
 const $=id=>document.getElementById(id);
 const overlay=$('authOverlay'),message=$('authMessage'),error=$('authError'),status=$('syncStatus');
-let uid=null,ready=false,busy=false,dirty=false,timer=null,baseline={goal:111111,entries:[]};
+let uid=null,ready=false,busy=false,dirty=false,timer=null,authResolving=true,baseline={goal:111111,entries:[]};
 const safeError=e=>{console.error(e);error.textContent=e?.message||String(e)};
 function merge(remote,local,removed){const entries=new Map(remote.entries.map(e=>[e.id,e]));for(const id of removed)entries.delete(id);for(const e of local.entries)if(!removed.has(e.id))entries.set(e.id,e);return [...entries.values()]}
 async function loadProfile(user){
@@ -59,14 +59,47 @@ async function sync(){
 }
 window.addEventListener('practice:changed',()=>{if(!ready)return;clearTimeout(timer);timer=setTimeout(sync,700)});
 window.addEventListener('online',()=>{if(ready)sync()});
+// Авторизация: PWA на iOS может открывать email-ссылку в отдельной вкладке Chrome.
+// Поэтому сохраняем сессию явно и разрешаем вставить ссылку прямо в установленном приложении.
+const manualPanel=$('manualPanel'),manualToggle=$('manualToggle');
+manualToggle.addEventListener('click',()=>{manualPanel.hidden=!manualPanel.hidden;manualToggle.setAttribute('aria-expanded',String(!manualPanel.hidden))});
+function rememberEmail(email){localStorage.setItem('prostrations-signin-email',email)}
+function restoreEmail(){return localStorage.getItem('prostrations-signin-email')||''}
+function cleanAuthUrl(){history.replaceState({},document.title,location.pathname+location.search.replace(/([?&])(?:apiKey|oobCode|mode|continueUrl|lang)=[^&]*/g,'$1').replace(/[?&]$/,''))}
+async function completeEmailSignIn(link,email){
+ if(!isSignInWithEmailLink(auth,link))throw new Error('Это не ссылка для входа Firebase. Скопируй полную ссылку из письма.');
+ if(!email)throw new Error('Укажи почту, на которую пришло письмо.');
+ message.textContent='Проверяем ссылку и восстанавливаем профиль…';error.textContent='';
+ await signInWithEmailLink(auth,email.trim(),link);
+ localStorage.removeItem('prostrations-signin-email');
+ if(isSignInWithEmailLink(auth,location.href))cleanAuthUrl();
+}
+$('manualPanel').addEventListener('submit',async e=>{
+ e.preventDefault();error.textContent='';const button=$('manualSubmit');button.disabled=true;
+ try{await completeEmailSignIn($('manualLink').value.trim(),$('manualEmail').value.trim())}
+ catch(err){safeError(err);message.textContent='Не удалось войти. Проверь ссылку и адрес почты.'}
+ finally{button.disabled=false}
+});
 $('authForm').addEventListener('submit',async e=>{
  e.preventDefault();error.textContent='';const email=$('authEmail').value.trim(),name=$('authName').value.trim();$('authSend').disabled=true;
- try{localStorage.setItem('prostrations-signin-email',email);sessionStorage.setItem('prostrations-name',name);await sendSignInLinkToEmail(auth,email,{url:location.origin+location.pathname,handleCodeInApp:true});message.textContent='Письмо отправлено. Открой ссылку, чтобы войти.'}
- catch(e){safeError(e)}finally{$('authSend').disabled=false}
+ try{rememberEmail(email);$('manualEmail').value=email;sessionStorage.setItem('prostrations-name',name);await sendSignInLinkToEmail(auth,email,{url:location.origin+location.pathname,handleCodeInApp:true});message.textContent='Письмо отправлено. Если ссылка откроется в Chrome, скопируй её и вставь ниже в установленном приложении.'}
+ catch(err){safeError(err)}finally{$('authSend').disabled=false}
 });
 $('logout').addEventListener('click',async()=>{if(!confirm('Выйти из профиля?'))return;ready=false;clearTimeout(timer);await signOut(auth);setUser(null);location.reload()});
-try{if(isSignInWithEmailLink(auth,location.href)){
- let email=localStorage.getItem('prostrations-signin-email');if(!email)email=prompt('Введи почту, на которую пришла ссылка:');
- if(email){await signInWithEmailLink(auth,email,location.href);localStorage.removeItem('prostrations-signin-email');history.replaceState({},document.title,location.origin+location.pathname)}
-}}catch(e){safeError(e)}
-onAuthStateChanged(auth,async user=>{if(!user){ready=false;overlay.hidden=false;$('authForm').hidden=false;message.textContent='Войди по ссылке из письма, чтобы синхронизировать практику.';return}try{await loadProfile(user)}catch(e){safeError(e);message.textContent='Не удалось загрузить данные. Проверь сеть и правила Firestore.'}});
+// Не показываем форму входа, пока Firebase не проверит сохранённую сессию.
+overlay.hidden=false;$('authForm').hidden=true;message.textContent='Проверяем вход…';
+$('manualEmail').value=restoreEmail();
+try{
+ await setPersistence(auth,browserLocalPersistence);
+ if(isSignInWithEmailLink(auth,location.href)){
+   let email=restoreEmail();
+   if(!email)email=prompt('Введи почту, на которую пришла ссылка:')||'';
+   if(email)await completeEmailSignIn(location.href,email);
+   else message.textContent='Укажи почту и вставь ссылку ниже, чтобы завершить вход.';
+ }
+}catch(err){safeError(err);message.textContent='Не удалось завершить вход. Можно вставить ссылку вручную ниже.'}
+onAuthStateChanged(auth,async user=>{
+ authResolving=false;
+ if(!user){ready=false;overlay.hidden=false;$('authForm').hidden=false;message.textContent='Войди по ссылке из письма, чтобы синхронизировать практику. На iPhone ссылку можно вставить ниже.';return}
+ try{await loadProfile(user)}catch(err){safeError(err);overlay.hidden=false;$('authForm').hidden=false;message.textContent='Не удалось загрузить данные. Проверь сеть и правила Firestore.'}
+});
